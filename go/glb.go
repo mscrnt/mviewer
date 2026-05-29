@@ -2,6 +2,7 @@ package mview
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 
@@ -14,23 +15,29 @@ import (
 // files top out at a few hundred MB in practice (capped per-entry by
 // MaxEntrySize) so streaming through is fine on any worker.
 //
-// Materials in this version are placeholder PBR opaque gray surfaces —
-// texture extraction lands in a follow-up commit. Mesh geometry
-// (positions, normals, tangents, primary + secondary UVs, vertex
-// colors) round-trips faithfully.
-//
-// Animations and skinning are out of scope for this commit; see
-// scene.AnimData and src/gltf/animated.rs for the upstream patterns to
-// port next.
-func ConvertToGLB(r io.Reader, w io.Writer) error {
-	entries, err := ReadAll(r)
+// Options control optional behaviour: total-size cap, concurrency,
+// channel merging, and KHR_mesh_quantization. See ConvertToGLBContext
+// for the cancellation-aware variant.
+func ConvertToGLB(r io.Reader, w io.Writer, opts ...Option) error {
+	return ConvertToGLBContext(context.Background(), r, w, opts...)
+}
+
+// ConvertToGLBContext is the context-aware variant. ctx cancellation
+// stops the conversion at the next safe checkpoint (entry boundary,
+// per-mesh, per-material). Use this for any path where the caller has
+// a deadline or might want to abort mid-flight (HTTP handlers,
+// background workers).
+func ConvertToGLBContext(ctx context.Context, r io.Reader, w io.Writer, opts ...Option) error {
+	o := resolveOptions(opts)
+
+	entries, err := ReadAllContext(ctx, r, opts...)
 	if err != nil {
 		return fmt.Errorf("mview: read archive: %w", err)
 	}
 
 	sceneEntry, ok := entries["scene.json"]
 	if !ok {
-		return fmt.Errorf("mview: archive missing scene.json")
+		return fmt.Errorf("mview: archive missing scene.json: %w", ErrMissingEntry)
 	}
 	scene, err := ParseScene(sceneEntry.Data)
 	if err != nil {
@@ -40,45 +47,85 @@ func ConvertToGLB(r io.Reader, w io.Writer) error {
 	doc := gltf.NewDocument()
 	doc.Asset.Generator = "github.com/mscrnt/mviewer/go"
 
-	materialIndex, err := buildMaterials(doc, scene, entries)
+	materialIndex, err := buildMaterials(ctx, doc, scene, entries, &o)
 	if err != nil {
 		return fmt.Errorf("mview: build materials: %w", err)
 	}
 
-	rootNodes := make([]int, 0, len(scene.Meshes))
-	for i := range scene.Meshes {
-		meshDesc := &scene.Meshes[i]
-		blob, ok := entries[meshDesc.File]
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if err := appendAllMeshes(ctx, doc, scene, entries, materialIndex, &o); err != nil {
+		return err
+	}
+
+	enc := gltf.NewEncoder(w)
+	if err := enc.Encode(doc); err != nil {
+		return fmt.Errorf("mview: encode glb: %w", err)
+	}
+	return nil
+}
+
+// appendAllMeshes decodes every scene mesh and registers them in the
+// glTF doc. Mesh blobs decode in parallel up to Options.Concurrency,
+// then serially flush into the doc (qmuntal/gltf's doc isn't safe to
+// mutate concurrently).
+func appendAllMeshes(
+	ctx context.Context,
+	doc *gltf.Document,
+	scene *Scene,
+	entries map[string]*Entry,
+	materialIndex map[string]int,
+	o *Options,
+) error {
+	type result struct {
+		desc    *MeshDesc
+		decoded *DecodedMesh
+		err     error
+	}
+	n := len(scene.Meshes)
+	results := make([]result, n)
+
+	// Parallel decode. Tiny meshes don't benefit much, but cave-grade
+	// 600k+ vertex blobs spread well across cores.
+	if err := runParallel(ctx, n, o.Concurrency, func(i int) error {
+		desc := &scene.Meshes[i]
+		blob, ok := entries[desc.File]
 		if !ok {
-			return fmt.Errorf("mview: mesh %q references missing entry %q", meshDesc.Name, meshDesc.File)
+			results[i] = result{desc: desc, err: fmt.Errorf("mesh %q references missing entry %q: %w", desc.Name, desc.File, ErrMissingEntry)}
+			return nil
 		}
-		decoded, err := DecodeMesh(blob.Data, meshDesc)
-		if err != nil {
-			return fmt.Errorf("mview: decode %q: %w", meshDesc.Name, err)
+		decoded, err := DecodeMesh(blob.Data, desc)
+		results[i] = result{desc: desc, decoded: decoded, err: err}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	rootNodes := make([]int, 0, n)
+	for i := range results {
+		r := &results[i]
+		if r.err != nil {
+			return fmt.Errorf("mview: decode %q: %w", r.desc.Name, r.err)
 		}
-		meshIdx, err := appendMesh(doc, meshDesc, decoded, materialIndex)
+		meshIdx, err := appendMesh(doc, r.desc, r.decoded, materialIndex, o)
 		if err != nil {
-			return fmt.Errorf("mview: build glTF mesh for %q: %w", meshDesc.Name, err)
+			return fmt.Errorf("mview: build glTF mesh for %q: %w", r.desc.Name, err)
 		}
 
-		node := &gltf.Node{Name: meshDesc.Name, Mesh: gltf.Index(meshIdx)}
-		if meshDesc.Transform != nil {
+		node := &gltf.Node{Name: r.desc.Name, Mesh: gltf.Index(meshIdx)}
+		if r.desc.Transform != nil {
 			var m [16]float64
-			for i, v := range *meshDesc.Transform {
-				m[i] = float64(v)
+			for j, v := range *r.desc.Transform {
+				m[j] = float64(v)
 			}
 			node.Matrix = m
 		}
 		doc.Nodes = append(doc.Nodes, node)
 		rootNodes = append(rootNodes, len(doc.Nodes)-1)
 	}
-
 	doc.Scenes[0].Nodes = rootNodes
-
-	enc := gltf.NewEncoder(w)
-	if err := enc.Encode(doc); err != nil {
-		return fmt.Errorf("mview: encode glb: %w", err)
-	}
 	return nil
 }
 
@@ -93,19 +140,25 @@ func appendMesh(
 	desc *MeshDesc,
 	decoded *DecodedMesh,
 	materialIndex map[string]int,
+	o *Options,
 ) (int, error) {
 	positionAcc := modeler.WritePosition(doc, decoded.Positions)
-	normalAcc := modeler.WriteNormal(doc, decoded.Normals)
-	uvAcc := modeler.WriteTextureCoord(doc, decoded.TexCoords)
 
-	// Tangents in glTF are vec4 (xyz + bitangent sign). We have the
-	// bitangent vector already, so we derive the handedness sign from
-	// (tangent × normal) · bitangent — +1 if right-handed, -1 if not.
-	tangents4 := make([][4]float32, len(decoded.Tangents))
-	for i := range decoded.Tangents {
-		tangents4[i] = packTangent(decoded.Tangents[i], decoded.Bitangents[i], decoded.Normals[i])
+	var normalAcc, tangentAcc int
+	if o != nil && o.QuantizedMesh {
+		normalAcc = writeQuantizedNormal(doc, decoded.Normals)
+		tangentAcc = writeQuantizedTangent(doc, decoded.Tangents, decoded.Bitangents, decoded.Normals)
+		markQuantizationExtension(doc)
+	} else {
+		normalAcc = modeler.WriteNormal(doc, decoded.Normals)
+		tangents4 := make([][4]float32, len(decoded.Tangents))
+		for i := range decoded.Tangents {
+			tangents4[i] = packTangent(decoded.Tangents[i], decoded.Bitangents[i], decoded.Normals[i])
+		}
+		tangentAcc = modeler.WriteTangent(doc, tangents4)
 	}
-	tangentAcc := modeler.WriteTangent(doc, tangents4)
+
+	uvAcc := modeler.WriteTextureCoord(doc, decoded.TexCoords)
 
 	attrs := gltf.PrimitiveAttributes{
 		gltf.POSITION:   positionAcc,
@@ -170,9 +223,14 @@ func packTangent(t, b, n [3]float32) [4]float32 {
 // ConvertBytesToGLB is a convenience wrapper that takes a fully
 // buffered .mview blob and returns the GLB bytes. Cheap for callers
 // that already have the archive in memory (HTTP request bodies etc).
-func ConvertBytesToGLB(in []byte) ([]byte, error) {
+func ConvertBytesToGLB(in []byte, opts ...Option) ([]byte, error) {
+	return ConvertBytesToGLBContext(context.Background(), in, opts...)
+}
+
+// ConvertBytesToGLBContext is the context-aware variant.
+func ConvertBytesToGLBContext(ctx context.Context, in []byte, opts ...Option) ([]byte, error) {
 	var out bytes.Buffer
-	if err := ConvertToGLB(bytes.NewReader(in), &out); err != nil {
+	if err := ConvertToGLBContext(ctx, bytes.NewReader(in), &out, opts...); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil

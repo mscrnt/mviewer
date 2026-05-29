@@ -13,6 +13,7 @@ package mview
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -71,6 +72,21 @@ var ErrDecompress = errors.New("mview: lzw decompression failed")
 // exceeds MaxStringLen without a terminator.
 var ErrCStringTooLong = errors.New("mview: c-string exceeded length cap")
 
+// ErrTruncated marks an unexpected end-of-stream — the archive
+// stopped mid-entry. Distinct from a clean end-of-archive (returned
+// as nil from ReadAll, io.EOF from ReadEntry).
+var ErrTruncated = errors.New("mview: input truncated")
+
+// ErrTotalSizeExceeded is returned when the aggregate decompressed
+// payload across all entries exceeds the configured MaxTotalSize.
+// Independent of the per-entry ErrEntryTooLarge cap.
+var ErrTotalSizeExceeded = errors.New("mview: archive payload exceeds total size cap")
+
+// ErrMissingEntry is returned by Find / ConvertToGLB when a required
+// named entry isn't present in the archive. Wrapped so callers can
+// distinguish "no such entry" from "stream broke."
+var ErrMissingEntry = errors.New("mview: entry not found in archive")
+
 // ReadEntry reads a single archive entry header + body from r. It
 // returns io.EOF cleanly when r has no more entries.
 //
@@ -83,13 +99,26 @@ func ReadEntry(r io.Reader) (*Entry, error) {
 }
 
 // Find scans r entry-by-entry and returns the first whose name
-// matches `want`. Returns io.EOF (wrapped) if the entry isn't in the
+// matches `want`. Returns ErrMissingEntry if the entry isn't in the
 // archive. Compressed entries are decompressed transparently.
 func Find(r io.Reader, want string) (*Entry, error) {
+	return FindContext(context.Background(), r, want)
+}
+
+// FindContext is the context-aware version of Find. Honours ctx
+// cancellation on each entry boundary so a long-running scan over a
+// slow reader can be aborted.
+func FindContext(ctx context.Context, r io.Reader, want string) (*Entry, error) {
 	br := newReader(r)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entry, err := readEntry(br)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("%w: %q", ErrMissingEntry, want)
+			}
 			return nil, err
 		}
 		if entry.Name == want {
@@ -114,18 +143,35 @@ func ExtractThumbnail(r io.Reader) ([]byte, error) {
 // has no central directory, so Find()-per-name from a fresh reader
 // would re-scan the whole file each time.
 //
-// Returns io.EOF wrapped only if r ended mid-entry; a clean end is
-// reported as a nil error.
-func ReadAll(r io.Reader) (map[string]*Entry, error) {
+// A clean end-of-archive is reported as a nil error; truncation
+// mid-entry surfaces as ErrTruncated.
+func ReadAll(r io.Reader, opts ...Option) (map[string]*Entry, error) {
+	return ReadAllContext(context.Background(), r, opts...)
+}
+
+// ReadAllContext is the context-aware variant of ReadAll. Honours
+// ctx.Err() on each entry boundary and enforces the per-call
+// MaxTotalSize cap if set (returns ErrTotalSizeExceeded once the
+// aggregate decompressed payload tips over).
+func ReadAllContext(ctx context.Context, r io.Reader, opts ...Option) (map[string]*Entry, error) {
+	o := resolveOptions(opts)
 	br := newReader(r)
 	out := make(map[string]*Entry)
+	var total int64
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entry, err := readEntry(br)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return out, nil
 			}
 			return nil, err
+		}
+		total += int64(len(entry.Data))
+		if o.MaxTotalSize > 0 && total > o.MaxTotalSize {
+			return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrTotalSizeExceeded, total, o.MaxTotalSize)
 		}
 		out[entry.Name] = entry
 	}
@@ -141,14 +187,34 @@ func newReader(r io.Reader) *bufio.Reader {
 	return bufio.NewReader(r)
 }
 
+// classifyReadErr re-tags io.EOF / io.ErrUnexpectedEOF as
+// ErrTruncated so the rest of the package's error surface tells a
+// consistent story. context cancellation passes through untouched.
+func classifyReadErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ErrTruncated
+	}
+	return err
+}
+
 func readEntry(br *bufio.Reader) (*Entry, error) {
 	name, err := readCString(br, MaxStringLen)
 	if err != nil {
-		return nil, fmt.Errorf("entry name: %w", err)
+		// readCString returns a clean io.EOF when the stream ends
+		// between entries — propagate that verbatim so callers can
+		// detect end-of-archive. Any other failure means we hit EOF
+		// after committing to a new entry: that's truncation.
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
+		return nil, fmt.Errorf("entry name: %w", classifyReadErr(err))
 	}
 	typ, err := readCString(br, MaxStringLen)
 	if err != nil {
-		return nil, fmt.Errorf("entry type: %w", err)
+		return nil, fmt.Errorf("entry type: %w", classifyReadErr(err))
 	}
 	var hdr struct {
 		Flags            uint32
@@ -156,14 +222,14 @@ func readEntry(br *bufio.Reader) (*Entry, error) {
 		UncompressedSize uint32
 	}
 	if err := binary.Read(br, binary.LittleEndian, &hdr); err != nil {
-		return nil, fmt.Errorf("entry header: %w", err)
+		return nil, fmt.Errorf("entry header: %w", classifyReadErr(err))
 	}
 	if hdr.CompressedSize > MaxEntrySize {
 		return nil, fmt.Errorf("%w: %q claims %d bytes", ErrEntryTooLarge, name, hdr.CompressedSize)
 	}
 	data := make([]byte, hdr.CompressedSize)
 	if _, err := io.ReadFull(br, data); err != nil {
-		return nil, fmt.Errorf("entry data for %q: %w", name, err)
+		return nil, fmt.Errorf("entry data for %q: %w", name, classifyReadErr(err))
 	}
 	if hdr.Flags&FlagCompressed != 0 {
 		decoded, err := Decompress(data, int(hdr.UncompressedSize))

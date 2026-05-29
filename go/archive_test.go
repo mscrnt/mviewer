@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 )
@@ -59,8 +58,8 @@ func TestExtractThumbnail_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when thumbnail entry is absent")
 	}
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("expected wrapped io.EOF, got %v", err)
+	if !errors.Is(err, ErrMissingEntry) {
+		t.Fatalf("expected ErrMissingEntry, got %v", err)
 	}
 }
 

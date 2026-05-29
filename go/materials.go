@@ -2,6 +2,7 @@ package mview
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,27 @@ func (tb *textureBuilder) ensureOptional(name string) (int, bool) {
 	return idx, true
 }
 
+// ensureFromBytes registers raw image bytes (typically a merged PNG
+// from the channel-pack path) as a glTF texture. The name acts as
+// both the cache key and the texture's glTF Name field. Returns the
+// texture index, or (0, false) if the embed failed.
+func (tb *textureBuilder) ensureFromBytes(name, mime string, data []byte) (int, bool) {
+	if idx, ok := tb.cache[name]; ok {
+		return idx, true
+	}
+	imageIdx, err := modeler.WriteImage(tb.doc, name, mime, bytes.NewReader(data))
+	if err != nil {
+		return 0, false
+	}
+	tb.doc.Textures = append(tb.doc.Textures, &gltf.Texture{
+		Name:   name,
+		Source: gltf.Index(imageIdx),
+	})
+	texIdx := len(tb.doc.Textures) - 1
+	tb.cache[name] = texIdx
+	return texIdx, true
+}
+
 // ensure looks up the given texture name in the archive and embeds it
 // as a glTF image + texture pair. Returns the texture index for use in
 // a TextureInfo. Repeat calls with the same name reuse the cached
@@ -72,21 +94,35 @@ func (tb *textureBuilder) ensure(name string) (int, error) {
 // and writes a real PBR material entry. Returns the material name →
 // glTF material index map the mesh writer uses to bind submeshes.
 //
-// Channel merging (albedo + alpha → RGBA base color, reflectivity +
-// gloss → metallic-roughness) is deferred to a follow-up — the upstream
-// Rust crate does it via image decode + re-encode, which doubles the
-// code surface. For now we embed the albedo and alpha textures
-// separately and trust the source PNG's own alpha channel where one
-// exists.
+// When Options.MergeMaterialChannels is true, this also runs the
+// channel-merge path: albedo + alpha → RGBA base color, reflectivity +
+// gloss → glTF metallic-roughness texture. The merge work happens in
+// parallel across materials up to Options.Concurrency.
 func buildMaterials(
+	ctx context.Context,
 	doc *gltf.Document,
 	scene *Scene,
 	entries map[string]*Entry,
+	o *Options,
 ) (map[string]int, error) {
+	merged := make([]*mergedTextures, len(scene.Materials))
+	if o != nil && o.MergeMaterialChannels {
+		if err := runParallel(ctx, len(scene.Materials), o.Concurrency, func(i int) error {
+			m := &scene.Materials[i]
+			merged[i] = mergeMaterialTextures(m, entries)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
 	textures := newTextureBuilder(doc, entries)
 	out := make(map[string]int, len(scene.Materials))
 
 	for i := range scene.Materials {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		m := &scene.Materials[i]
 		pbr := &gltf.PBRMetallicRoughness{
 			BaseColorFactor: &[4]float64{1, 1, 1, 1},
@@ -94,9 +130,25 @@ func buildMaterials(
 			RoughnessFactor: gltf.Float(1),
 		}
 
-		if m.AlbedoTex != "" {
+		// Merged base color wins if available; otherwise use the raw
+		// albedo as-is.
+		if merged[i] != nil && merged[i].baseColorPNG != nil {
+			if texIdx, ok := textures.ensureFromBytes(m.AlbedoTex+"+alpha.png", "image/png", merged[i].baseColorPNG); ok {
+				pbr.BaseColorTexture = &gltf.TextureInfo{Index: texIdx}
+			}
+		} else if m.AlbedoTex != "" {
 			if texIdx, ok := textures.ensureOptional(m.AlbedoTex); ok {
 				pbr.BaseColorTexture = &gltf.TextureInfo{Index: texIdx}
+			}
+		}
+
+		if merged[i] != nil && merged[i].metallicRoughnessPNG != nil {
+			refl := ""
+			if m.ReflectivityTex != nil {
+				refl = *m.ReflectivityTex
+			}
+			if texIdx, ok := textures.ensureFromBytes(refl+"+mr.png", "image/png", merged[i].metallicRoughnessPNG); ok {
+				pbr.MetallicRoughnessTexture = &gltf.TextureInfo{Index: texIdx}
 			}
 		}
 
