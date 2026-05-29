@@ -2,35 +2,91 @@
 
 A native Go decoder for the Marmoset `.mview` archive format.
 
-This is a port of the Rust crate at the root of the repository,
-maintained as a separate Go library so projects that need an
-mview → glTF pipeline without spawning a CLI can vendor it directly.
+Initially a port of the Rust crate at the root of this repository, the
+Go module has grown into a friendlier API surface: streaming reader
+interfaces, `context.Context` cancellation, functional options,
+memory-bomb guards, native fuzz coverage, and a small CLI. The
+library is fine to vendor on its own — the Rust crate isn't in the
+import path.
 
 ## Status
 
-| Capability                              | Status      |
-|-----------------------------------------|-------------|
-| Archive parser (named entries)          | ✅ Working  |
-| LZW decompression (12-bit, 4k dict)     | ✅ Working  |
-| `scene.json` parser                     | ✅ Working  |
-| Mesh decoder (positions, UVs, normals)  | ✅ Working  |
-| Material / texture extraction           | ✅ Working (single-texture-per-slot) |
-| Skinning + animation                    | 🚧 Planned  |
-| glTF / GLB writer                       | ✅ Working  |
+| Capability                                | Status     |
+|-------------------------------------------|------------|
+| Archive parser (named entries)            | ✅          |
+| LZW decompression (12-bit, 4k dict)       | ✅          |
+| `scene.json` parser                       | ✅          |
+| Mesh decoder (positions, UVs, normals)    | ✅          |
+| Material / texture extraction             | ✅          |
+| Channel merging (albedo+α, refl+gloss→MR) | ✅          |
+| glTF / GLB writer                         | ✅          |
+| `KHR_mesh_quantization` extension         | ✅          |
+| `context.Context` cancellation everywhere | ✅          |
+| Concurrent mesh + material decode         | ✅          |
+| Memory-bomb caps (entry + aggregate)      | ✅          |
+| `Validate()` / `IsMview()` sniffers       | ✅          |
+| `fs.FS` integration                       | ✅          |
+| Native fuzz tests + benchmarks            | ✅          |
+| Standalone CLI (`cmd/mview`)              | ✅          |
+| Skinning + animation                      | 🚧 planned |
+
+## Install
+
+```
+go get github.com/mscrnt/mviewer/go
+go install github.com/mscrnt/mviewer/go/cmd/mview@latest
+```
+
+## Library
+
+```go
+import mview "github.com/mscrnt/mviewer/go"
+
+// Simple path.
+glb, err := mview.ConvertBytesToGLB(in)
+
+// Hardened path for an HTTP handler.
+err := mview.ConvertToGLBContext(ctx, body, w,
+    mview.WithMaxTotalSize(64<<20),       // refuse > 64 MiB aggregate
+    mview.WithMaterialChannelMerge(true), // proper PBR base color + MR
+    mview.WithQuantizedMesh(true),        // 6 % smaller GLB
+    mview.WithConcurrency(4),             // decode meshes in parallel
+)
+
+// Cheap upload-time gate.
+if err := mview.Validate(body); err != nil {
+    return http.StatusBadRequest
+}
+
+// fs.FS integration.
+err := mview.ConvertFromFS(ctx, embeddedFS, "models/x.mview", w)
+```
+
+## CLI
+
+```
+mview convert in.mview out.glb [--merge-channels] [--quantize] [--max-size N]
+mview validate in.mview [--max-size N]
+mview info in.mview
+mview thumb in.mview out.jpg
+```
 
 ## Why a Go port?
 
-The upstream Rust crate is excellent, but distributing it as a CLI in
-a multi-language stack means shelling out to a subprocess and shipping
-a ~10 MB binary in the container. Importing a Go library at the module
-boundary is friction-free for Go consumers.
-
-## License
-
-Matches the upstream license once it lands. Until then this branch
-preserves both implementations for the maintainer's convenience.
+The upstream Rust crate is excellent, but multi-language stacks pay
+twice — once to ship the binary, once to learn its CLI. A Go library
+imports at the module boundary with no subprocess hop, ports cleanly
+into HTTP middleware, fans out across cores via `WithConcurrency`, and
+brings native `context.Context` + fuzzing that the upstream doesn't
+have.
 
 ## Format reference
 
 See [`docs/reverse-engineering/marmoset-js-spec.md`](../docs/reverse-engineering/marmoset-js-spec.md)
 at the root of the repo for the binary layout the parsers depend on.
+
+## License
+
+Tracks whatever the upstream `mviewer` repo eventually adopts. The
+Go module is otherwise distributed under the same terms as the
+artist-alley project that drove its first release.

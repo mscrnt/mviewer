@@ -1,0 +1,97 @@
+name: Go port
+
+on:
+  push:
+    branches:
+      - go-port
+    paths:
+      - 'go/**'
+      - '.github/workflows/go-port.yml'
+  pull_request:
+    paths:
+      - 'go/**'
+      - '.github/workflows/go-port.yml'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go/go.sum
+
+      - name: Tidy check
+        run: |
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod / go.sum out of date — run 'go mod tidy' inside go/"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build CLI
+        run: go build ./cmd/mview
+
+  fuzz:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go/go.sum
+
+      # Short fuzz pass on each target so any new corpus seed that
+      # triggers a panic regression is caught at PR time. 20s per
+      # target keeps the matrix-aware job under 2 min total.
+      - name: Fuzz archive
+        run: go test -fuzz=FuzzReadEntry -fuzztime=20s -run=^$ ./...
+      - name: Fuzz LZW
+        run: go test -fuzz=FuzzDecompress -fuzztime=20s -run=^$ ./...
+      - name: Fuzz scene
+        run: go test -fuzz=FuzzParseScene -fuzztime=20s -run=^$ ./...
+      - name: Fuzz convert
+        run: go test -fuzz=FuzzConvertToGLB -fuzztime=20s -run=^$ ./...
+      - name: Fuzz sniff
+        run: go test -fuzz=FuzzIsMview -fuzztime=20s -run=^$ ./...
+
+  bench:
+    name: Benchmark smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go/go.sum
+      # `-benchtime=1x` runs each benchmark exactly once so the job is
+      # really a "does it still complete without OOM/regression" smoke
+      # check rather than a perf measurement.
+      - name: Run benchmarks (smoke)
+        run: go test -bench=. -benchtime=1x -run=^$ ./...
