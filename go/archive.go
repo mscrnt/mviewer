@@ -279,6 +279,13 @@ func Decompress(input []byte, outputLen int) ([]byte, error) {
 	if len(input) == 0 {
 		return nil, fmt.Errorf("%w: empty stream", ErrDecompress)
 	}
+	// outputLen == 0 is degenerate but legal — a compressed entry
+	// claiming zero decompressed bytes. The body below would write
+	// input[0] to out[0] before reaching the writeIdx==outputLen
+	// check, panicking on an empty out slice. Short-circuit instead.
+	if outputLen == 0 {
+		return nil, fmt.Errorf("%w: zero output length", ErrDecompress)
+	}
 	out := make([]byte, outputLen)
 	var (
 		tableOffsets [4096]int

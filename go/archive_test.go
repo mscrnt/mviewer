@@ -129,3 +129,33 @@ func TestDecompress_EmptyInputRejected(t *testing.T) {
 		t.Fatalf("expected empty-stream error, got %v", err)
 	}
 }
+
+// Regression: a compressed-flagged entry with UncompressedSize=0
+// crashed the inner loop because it tried to write input[0] to an
+// empty output slice. Caught by FuzzIsMview on CI.
+func TestDecompress_ZeroOutputLength(t *testing.T) {
+	_, err := Decompress([]byte{0x42}, 0)
+	if !errors.Is(err, ErrDecompress) {
+		t.Fatalf("expected ErrDecompress, got %v", err)
+	}
+}
+
+// And the same shape end-to-end: an archive whose only entry is
+// compressed with UncompressedSize=0 must surface as a clean error,
+// never a panic.
+func TestReadEntry_CompressedZeroLengthDoesNotPanic(t *testing.T) {
+	entry := buildEntry("x.bin", "application/octet-stream", FlagCompressed, []byte{0x42})
+	// buildEntry uses len(data) for both sizes; patch the
+	// UncompressedSize field to 0.
+	// Layout: name\0 type\0 flags(u32) compressed(u32) uncompressed(u32) data
+	// uncompressedSize starts at: len("x.bin")+1 + len("application/octet-stream")+1 + 4 + 4 = 6 + 25 + 4 + 4 = 39
+	off := len("x.bin") + 1 + len("application/octet-stream") + 1 + 4 + 4
+	entry[off+0] = 0
+	entry[off+1] = 0
+	entry[off+2] = 0
+	entry[off+3] = 0
+	_, err := ReadEntry(bytes.NewReader(entry))
+	if err == nil {
+		t.Fatal("expected error for compressed zero-length entry")
+	}
+}
