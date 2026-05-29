@@ -68,15 +68,15 @@ jobs:
       # triggers a panic regression is caught at PR time. 20s per
       # target keeps the matrix-aware job under 2 min total.
       - name: Fuzz archive
-        run: go test -fuzz=FuzzReadEntry -fuzztime=20s -run=^$ ./...
+        run: go test -fuzz=FuzzReadEntry -fuzztime=20s -run=^$ .
       - name: Fuzz LZW
-        run: go test -fuzz=FuzzDecompress -fuzztime=20s -run=^$ ./...
+        run: go test -fuzz=FuzzDecompress -fuzztime=20s -run=^$ .
       - name: Fuzz scene
-        run: go test -fuzz=FuzzParseScene -fuzztime=20s -run=^$ ./...
+        run: go test -fuzz=FuzzParseScene -fuzztime=20s -run=^$ .
       - name: Fuzz convert
-        run: go test -fuzz=FuzzConvertToGLB -fuzztime=20s -run=^$ ./...
+        run: go test -fuzz=FuzzConvertToGLB -fuzztime=20s -run=^$ .
       - name: Fuzz sniff
-        run: go test -fuzz=FuzzIsMview -fuzztime=20s -run=^$ ./...
+        run: go test -fuzz=FuzzIsMview -fuzztime=20s -run=^$ .
 
   bench:
     name: Benchmark smoke
@@ -94,4 +94,4 @@ jobs:
       # really a "does it still complete without OOM/regression" smoke
       # check rather than a perf measurement.
       - name: Run benchmarks (smoke)
-        run: go test -bench=. -benchtime=1x -run=^$ ./...
+        run: go test -bench=. -benchtime=1x -run=^$ .
