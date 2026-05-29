@@ -28,7 +28,7 @@ import path.
 | `fs.FS` integration                       | ✅          |
 | Native fuzz tests + benchmarks            | ✅          |
 | Standalone CLI (`cmd/mview`)              | ✅          |
-| Skinning + animation                      | 🚧 planned |
+| Skinning + animation                      | ✅ baked-TRS path |
 
 ## Install
 

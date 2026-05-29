@@ -60,6 +60,17 @@ func ConvertToGLBContext(ctx context.Context, r io.Reader, w io.Writer, opts ...
 		return err
 	}
 
+	// Animations are best-effort: an export with malformed AnimData
+	// shouldn't fail the whole convert. The parser already enforces
+	// archive-side invariants, so a real failure here means our
+	// emitter needs a fix, not the source file.
+	if scene.AnimData != nil {
+		set, err := ParseAnimations(entries, scene)
+		if err == nil && set != nil {
+			_ = appendAnimations(doc, set)
+		}
+	}
+
 	enc := gltf.NewEncoder(w)
 	if err := enc.Encode(doc); err != nil {
 		return fmt.Errorf("mview: encode glb: %w", err)
