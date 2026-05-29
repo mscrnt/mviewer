@@ -16,7 +16,7 @@ mview → glTF pipeline without spawning a CLI can vendor it directly.
 | Mesh decoder (positions, UVs, normals)  | ✅ Working  |
 | Material / texture extraction           | 🚧 Planned  |
 | Skinning + animation                    | 🚧 Planned  |
-| glTF / GLB writer                       | 🚧 Planned  |
+| glTF / GLB writer                       | ✅ Working (placeholder materials) |
 
 ## Why a Go port?
 

@@ -108,6 +108,29 @@ func ExtractThumbnail(r io.Reader) ([]byte, error) {
 	return e.Data, nil
 }
 
+// ReadAll consumes the entire archive and returns every entry
+// indexed by Name. Use this when a downstream pass (e.g. the GLB
+// converter) needs random access to multiple blobs — the archive
+// has no central directory, so Find()-per-name from a fresh reader
+// would re-scan the whole file each time.
+//
+// Returns io.EOF wrapped only if r ended mid-entry; a clean end is
+// reported as a nil error.
+func ReadAll(r io.Reader) (map[string]*Entry, error) {
+	br := newReader(r)
+	out := make(map[string]*Entry)
+	for {
+		entry, err := readEntry(br)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return out, nil
+			}
+			return nil, err
+		}
+		out[entry.Name] = entry
+	}
+}
+
 // newReader wraps r in a bufio.Reader if it isn't already one. This
 // keeps ReadByte / Read calls cheap when the caller passes us a raw
 // io.Reader.
