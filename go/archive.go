@@ -29,10 +29,13 @@ const (
 	// type field.
 	MaxStringLen = 256
 
-	// MaxEntrySize caps the data length of a single entry. 32 MB
-	// covers the largest textures we've seen + leaves headroom; a
-	// future format change that legitimately needs more can bump it.
-	MaxEntrySize = 32 * 1024 * 1024
+	// MaxEntrySize caps the data length of a single entry. 128 MB
+	// is sized for real-world meshes — the Marmoset Cave_Terrain
+	// sample tops 52 MB for its packed `mesh0.dat`, and individual
+	// 4K HDR textures can exceed that. The cap exists to block
+	// pathological 2 GB+ values from a corrupted header before any
+	// allocation happens.
+	MaxEntrySize = 128 * 1024 * 1024
 
 	// FlagCompressed is the bit in an entry's `flags` field that
 	// says the data is LZW-compressed and needs Decompress() to be

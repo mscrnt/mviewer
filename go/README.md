@@ -13,7 +13,7 @@ mview → glTF pipeline without spawning a CLI can vendor it directly.
 | Archive parser (named entries)          | ✅ Working  |
 | LZW decompression (12-bit, 4k dict)     | ✅ Working  |
 | `scene.json` parser                     | ✅ Working  |
-| Mesh decoder (positions, UVs, normals)  | 🚧 Planned  |
+| Mesh decoder (positions, UVs, normals)  | ✅ Working  |
 | Material / texture extraction           | 🚧 Planned  |
 | Skinning + animation                    | 🚧 Planned  |
 | glTF / GLB writer                       | 🚧 Planned  |
