@@ -14,9 +14,9 @@ mview → glTF pipeline without spawning a CLI can vendor it directly.
 | LZW decompression (12-bit, 4k dict)     | ✅ Working  |
 | `scene.json` parser                     | ✅ Working  |
 | Mesh decoder (positions, UVs, normals)  | ✅ Working  |
-| Material / texture extraction           | 🚧 Planned  |
+| Material / texture extraction           | ✅ Working (single-texture-per-slot) |
 | Skinning + animation                    | 🚧 Planned  |
-| glTF / GLB writer                       | ✅ Working (placeholder materials) |
+| glTF / GLB writer                       | ✅ Working  |
 
 ## Why a Go port?
 

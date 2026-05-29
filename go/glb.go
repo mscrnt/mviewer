@@ -40,20 +40,9 @@ func ConvertToGLB(r io.Reader, w io.Writer) error {
 	doc := gltf.NewDocument()
 	doc.Asset.Generator = "github.com/mscrnt/mviewer/go"
 
-	// Placeholder material table — one slot per scene material so
-	// submesh references resolve. Real PBR + textures land in B-12f-5.
-	materialIndex := make(map[string]int, len(scene.Materials))
-	for _, m := range scene.Materials {
-		idx := len(doc.Materials)
-		doc.Materials = append(doc.Materials, &gltf.Material{
-			Name: m.Name,
-			PBRMetallicRoughness: &gltf.PBRMetallicRoughness{
-				BaseColorFactor: &[4]float64{0.8, 0.8, 0.8, 1},
-				MetallicFactor:  gltf.Float(0),
-				RoughnessFactor: gltf.Float(1),
-			},
-		})
-		materialIndex[m.Name] = idx
+	materialIndex, err := buildMaterials(doc, scene, entries)
+	if err != nil {
+		return fmt.Errorf("mview: build materials: %w", err)
 	}
 
 	rootNodes := make([]int, 0, len(scene.Meshes))
